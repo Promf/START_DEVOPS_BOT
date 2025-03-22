@@ -1,0 +1,31 @@
+services:
+  bot:
+    hostname: bot
+    build: bot/
+    depends_on:
+      - db
+    networks:
+      - my_network
+  db:
+    hostname: db
+    build: db/
+    volumes:
+      - postgres_db_data:/var/lib/postgresql/data
+    networks:
+      - my_network
+  db_repl:
+    hostname: db_repl
+    build: db_repl/
+    volumes:
+      - postgres_db_repl_data:/var/lib/postgresql/data
+    networks:
+      - my_network
+volumes:
+  postgres_db_data:
+  postgres_db_repl_data:
+networks:
+  my_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
