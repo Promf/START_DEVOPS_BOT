@@ -1,0 +1,5 @@
+[db]
+db_main ansible_host=192.168.149.140 ansible_user=ars ansible_password=123123
+db_repl ansible_host=192.168.149.175 ansible_user=ars ansible_password=123123
+[bots]
+bot ansible_host=192.168.149.177 ansible_user=ars ansible_password=123123

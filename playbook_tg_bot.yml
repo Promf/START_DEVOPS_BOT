@@ -1,0 +1,243 @@
+- name: Test
+  hosts: all    # playbook запустится для всех хостов в inventory.
+  become: yes   # команда позволяет ansible использовать права root.
+  vars:
+    postgres_version: "15"
+    pg_hba_dir: "/etc/postgresql"
+    pg_config_dir: "/etc/postgresql/{{ postgres_version }}/main"
+    github_raw_db_base: "https://raw.githubusercontent.com/Promf/START_DEVOPS_BOT/refs/heads/docker/db"
+    github_raw_db_repl_base: "https://raw.githubusercontent.com/Promf/START_DEVOPS_BOT/refs/heads/docker/db_repl"
+    init_sql_path: "/tmp/init.sql"
+    pg_data_dir: "/var/lib/postgresql/15/main"
+    postgres_db_name: "tgbot"
+
+
+  tasks:        # ниже начинается список задач. Обратите внимание, tasks во множественном числе. Иначе получим ошибку при выполнении плейбука
+  
+  - name: Установить PostgreSQL
+    ansible.builtin.apt:
+      name: "postgresql-{{ postgres_version }}"
+      state: present
+    when: inventory_hostname in groups['db']
+
+  - name: Устанавливаем пакет python3-psycopg2
+    ansible.builtin.apt:
+      name: python3-psycopg2
+      state: present
+    when: inventory_hostname in groups['db']
+ 
+  - name: Create data directory
+    file:
+      path: "{{ pg_data_dir }}"
+      state: directory
+      owner: postgres
+      group: postgres
+      mode: '0700'
+    when: inventory_hostname in groups['db']
+
+  - name: Создать директорию для конфигов
+    ansible.builtin.file:
+      path: "{{ pg_config_dir }}"
+      state: directory
+      owner: postgres
+      group: postgres
+      mode: '0755'
+    when: inventory_hostname in groups['db']
+
+  - name: Скачать postgresql.conf на db
+    ansible.builtin.get_url:
+      url: "{{ github_raw_db_base }}/postgresql.conf"
+      dest: "{{ pg_config_dir }}/postgresql.conf"
+      owner: postgres
+      group: postgres
+      mode: '0644'
+    notify: restart postgres
+    when: inventory_hostname == "db_main"
+
+  - name: Скачать postgresql.conf на db_repl
+    ansible.builtin.get_url:
+      url: "{{ github_raw_db_repl_base }}/postgresql.conf"
+      dest: "{{ pg_config_dir }}/postgresql.conf"
+      owner: postgres
+      group: postgres
+      mode: '0644'
+    notify: restart postgres
+    when: inventory_hostname == "db_repl"
+
+  - name: Копировать pg_hba.conf на db_main
+    ansible.builtin.copy:
+      src: "./pg_hba.conf"   # Путь к файлу на управляющей машине
+      dest: "{{ pg_hba_dir }}/pg_hba.conf"  # Путь на целевой машине
+      owner: postgres
+      group: postgres
+      mode: '0640'
+    notify: restart postgres
+    when: inventory_hostname == "db_main"
+
+  - name: Скачать init.sql
+    ansible.builtin.get_url:
+      url: "{{ github_raw_db_base }}/init.sql"
+      dest: "/tmp/init.sql"
+      owner: postgres
+      group: postgres
+      mode: '0640'
+    notify: restart postgres
+    when: inventory_hostname == "db_main"
+
+  - name: Копировать pg_hba.conf на db_repl
+    ansible.builtin.copy:
+      src: "./pg_hba.conf"   # Путь к файлу на управляющей машине
+      dest: "{{ pg_hba_dir }}/pg_hba.conf"  # Путь на целевой машине
+      owner: postgres
+      group: postgres
+      mode: '0640'
+    notify: restart postgres
+    when: inventory_hostname == "db_repl"
+
+  - name: Скачать docker-entrypoint.sh на db_repl
+    ansible.builtin.get_url:
+      url: "{{ github_raw_db_repl_base }}/docker-entrypoint.sh"
+      dest: "/root"
+      owner: postgres
+      group: postgres
+      mode: '0640'
+    notify: restart postgres
+    when: inventory_hostname == "db_repl"
+
+  - name: Удалить строку с командой exec из docker-entrypoint.sh
+    lineinfile:
+      path: "/root/docker-entrypoint.sh"
+      regexp: '^exec.*'
+      state: absent
+    become: yes
+    when: inventory_hostname == "db_repl"
+
+
+  - name: Update postgresql.conf
+    lineinfile:
+      path: "{{ pg_config_dir }}/postgresql.conf"
+      regexp: "^#?data_directory ="
+      line: "data_directory = '{{ pg_data_dir }}'"
+      backup: yes
+    when: inventory_hostname in groups['db']
+
+  - name: Create database
+    community.postgresql.postgresql_db:
+      name: "{{ postgres_db_name }}"
+      encoding: "UTF-8"
+      lc_ctype: "en_US.UTF-8"
+      lc_collate: "en_US.UTF-8"
+      login_user: postgres
+      login_host: localhost  
+    when: inventory_hostname == "db_main"
+
+  - name: restart postgres
+    ansible.builtin.service:
+      name: postgresql
+      state: restarted
+    when: inventory_hostname in groups['db']
+
+  - name: delete files on db_repl
+    command: "sh -c 'rm -rf /var/lib/postgresql/*'"
+    become: yes
+    when: inventory_hostname == "db_repl"
+
+  - name: Execute entypoint
+    command: "sh -c 'chmod +x /root/docker-entrypoint.sh && /root/docker-entrypoint.sh'"
+    become: yes
+    environment:
+      PGDATA: "/var/lib/postgresql/15/main"
+      REPLICATION_MODE: "standby"
+      PG_MASTER_HOST: "192.168.149.140"
+      PG_MASTER_PORT: "5432"
+      REPLICATOR_USER: "postgres"
+      PGPASSWORD: "123123"
+    when: inventory_hostname == "db_repl"
+
+  - name: fix permissions
+    command: "sh -c 'sudo chown -R postgres:postgres /var/lib/postgresql/'"
+    become: yes 
+    when: inventory_hostname == "db_repl"
+
+  - name: restart postgres
+    ansible.builtin.service:
+      name: postgresql
+      state: restarted
+    when: inventory_hostname == "db_repl"
+
+  - name: Execute SQL
+    community.postgresql.postgresql_script:
+      path: "/tmp/init.sql"
+      db: "tgbot"
+      login_user: "postgres"
+    become: yes
+    when: inventory_hostname == "db_main"
+
+  - name: Installing package
+    apt:                 # используем модуль apt для установки утилит vim и mc.
+      name:
+        - git
+      state: latest      # версия пакета, которую мы хотим установить.
+    when: inventory_hostname == "bot"
+
+  - name: Create dir
+    ansible.builtin.file:
+      path: "/root/bot"
+      state: directory
+      mode: '0755'
+      owner: "root"
+      group: "root"
+    when: inventory_hostname == "bot"
+
+  - name: Clone git
+    ansible.builtin.git:
+      repo: "https://github.com/Promf/START_DEVOPS_BOT.git"
+      dest: "/root/bot"
+      version: "docker"
+      clone: yes
+      update: no  # Не обновлять, если директория уже существует    
+    when: inventory_hostname == "bot"
+
+  - name: Copy .env file
+    ansible.builtin.copy:
+      src: ".env"          # Путь на управляющей машине
+      dest: "/root/bot/bot/.env"    # Путь на целевом сервере
+      mode: "0600"         # Права доступа (только владелец)
+      owner: "root"     # Владелец файла
+      group: "root"    # Группа
+      backup: yes          # Создать бэкап при изменении
+    when: inventory_hostname == "bot"
+
+  - name: Install system dependencies
+    ansible.builtin.apt:
+      name:
+        - python3
+        - python3-venv
+        - python3-pip
+        - python3-dev
+        - libpq-dev
+        - build-essential
+        - libssl-dev
+        - libffi-dev
+      state: present
+    when: inventory_hostname == "bot"
+  
+  - name: Create virtual environment
+    pip:
+      virtualenv: "/root/bot/bot/venv"
+      virtualenv_command: python3 -m venv
+      requirements: "/root/bot/bot/requirements.txt"
+    when: inventory_hostname == "bot"
+
+  - name: Run bot in background
+    command: "/root/bot/bot/venv/bin/python /root/bot/bot/tgBot.py"
+    async: 300
+    poll: 0
+    when: inventory_hostname == "bot"
+
+  handlers:
+    - name: restart postgres
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted
+
